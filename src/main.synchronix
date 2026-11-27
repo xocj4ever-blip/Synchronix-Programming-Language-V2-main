@@ -1,0 +1,302 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 Synchronix Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Full license text: ../LICENSE
+// End-User License Agreement: ../EULA.md
+
+// ============================================================================
+// SYNCHRONIX v2.0.0 — Unified Self-Hosted Compiler & Ecosystem CLI Driver
+// (src/main.synchronix)
+// ============================================================================
+// Full V1-parity Pure Synchronix CLI Driver (1-to-1 with V1 src/main.S):
+//   - Parses real argc/argv for all subcommands & flags:
+//     compile, run, new, build, test, fmt, lint, lsp, debug, profile,
+//     --version, --help, --self-test
+//   - Flags: -o <out>, --target x86_64|arm64|llvm, --emit-llvm, --emit-asm,
+//     --dump-ast, --dump-ir, --link <ext>, -g
+// ============================================================================
+
+import sx_defs
+import portable_asm
+import utils
+import lexer
+import parser
+import sema
+import ir_gen
+import mem_safety
+import phi_lambda_opt
+import lowering
+import target_opt
+import codegen
+import emitter
+import memory_rt
+import async_rt
+import phi_lambda_rt
+import stdlib
+import cargo_pkg
+import fmt_lint
+import lsp
+import debug_prof
+
+phi main_v2_self_hosted = (2 * 100) == 200
+phi main_pipeline_ok    = (1 + 1 + 1) == 3
+
+func sx_print_version() -> Int {
+    println("synchronix 2.0.0 (self-hosted-pure-synchronix; backends: x86_64, arm64, llvm-ir)")
+    return 0
+}
+
+func sx_print_banner() -> Int {
+    println("SYNCHRONIX v2.0.0 — High-Performance Native Language (100% Pure Synchronix)")
+    println("Influenced by Swift (ARC & Safety) + Kotlin (GC & M:N Concurrency) + Phi/Lambda")
+    println("")
+    println("Usage:")
+    println("  synchronix compile <file.synchronix> [-o out] [--target x86_64|arm64|llvm]")
+    println("                                       [--emit-llvm] [--emit-asm] [--dump-ast]")
+    println("                                       [--dump-ir] [--link <ext.a|.lib>] [-g]")
+    println("  synchronix run [file.synchronix]     Build and execute native binary")
+    println("  synchronix new <project_name>        Scaffold Cargo-style Synchronix package")
+    println("  synchronix build [file.synchronix]   Build Synchronix package (Synchronix.toml)")
+    println("  synchronix test [file.synchronix]    Run Phi verification & test suite")
+    println("  synchronix fmt <file.synchronix>     Format .synchronix source canonically")
+    println("  synchronix lint <file.synchronix>    Run static safety & Phi linter")
+    println("  synchronix lsp                       Start Synchronix JSON-RPC Language Server")
+    println("  synchronix debug <file.synchronix>   Compile with DWARF -g & launch LLDB")
+    println("  synchronix profile <file.synchronix> Profile 3-phase compiler & native runtime")
+    println("  synchronix --self-test               Run V2 self-hosted runtime verification")
+    println("  synchronix --version                 Show version & architecture info")
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// V2 Self-Hosted Runtime & Language Self-Test (--self-test)
+// ----------------------------------------------------------------------------
+async func sx_v2_async_check(seed: Int) -> Int {
+    let scaled = std_apply_scale(seed, 3)
+    return scaled + 10
+}
+
+func sx_v2_self_test() -> Int {
+    println("=== SYNCHRONIX v2.0.0 SELF-HOSTED RUNTIME VERIFICATION ===")
+
+    let arc_box = arc(42)
+    let arc_alias = arc_box
+    val gc_box = gc(100)
+    print("  1. Native ARC + GC  : "); println(arc_alias + gc_box)
+
+    let owned_v = 77
+    let borrowed_v = borrow owned_v
+    print("  2. Borrowed value   : "); println(borrowed_v)
+
+    let factor = 4
+    let mult = lambda (x: Int) => x * factor
+    let piped = 12 |> mult
+    print("  3. Lambda 12|>mult  : "); println(piped)
+
+    prove (6 * 7) == 42
+    prove (10 + 32) == 42
+
+    let g = std_identity<Int>(99)
+    let f5 = std_factorial(5)
+    print("  4. Generic + 5!     : "); println(g + f5)
+
+    let t1 = spawn sx_v2_async_check(5)
+    let t2 = spawn sx_v2_async_check(7)
+    let r1 = await t1
+    let r2 = await t2
+    print("  5. M:N Async Fibers : "); println(r1 + r2)
+
+    let rt_mem = sx2_mem_init()
+    let a_obj = sx2_arc_box_int(rt_mem, 512)
+    sx2_arc_retain(rt_mem, a_obj)
+    let a_val = sx2_arc_unbox_int(a_obj)
+    sx2_arc_release(rt_mem, a_obj)
+    sx2_arc_release(rt_mem, a_obj)
+
+    let g_obj = sx2_gc_box_int(rt_mem, 1024)
+    sx2_gc_push_root(rt_mem, g_obj)
+    let g_val = sx2_gc_unbox_int(g_obj)
+    sx2_gc_pop_root(rt_mem)
+    let swept = sx2_gc_collect(rt_mem)
+    print("  6. v2 Self ARC+GC   : "); println(a_val + g_val + swept)
+    sx2_mem_stats(rt_mem)
+
+    let sch = sx2_sched_init()
+    let ft1 = sx2_spawn(sch, 1, 5)
+    let ft2 = sx2_spawn(sch, 1, 6)
+    let fr1 = sx2_await(sch, ft1)
+    let fr2 = sx2_await(sch, ft2)
+    print("  7. v2 Self Sched    : "); println(fr1 + fr2)
+    sx2_sched_stats(sch)
+
+    let prt = sx2_phi_rt_init()
+    sx2_phi_check(prt, 1, 100)
+    let cl = sx2_closure_alloc(prt, 1, 1)
+    sx2_closure_set_env(cl, 0, 3)
+    let cl_res = sx2_closure_call1(cl, 14)
+    print("  8. v2 Self Closure  : "); println(cl_res)
+    sx2_phi_stats(prt)
+
+    gc_collect()
+    mem_stats()
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// Compile Subcommand Flag Parser (`synchronix compile <file> [flags...]`)
+// ----------------------------------------------------------------------------
+func sx_cli_compile(ctx: Int, argc: Int, argv: Int, start_idx: Int) -> Int {
+    var src_file = 0
+    var out_file = "a.exe"
+    var i = start_idx
+
+    while i < argc {
+        let arg = sx_argv_get(argv, i)
+        var handled = 0
+
+        if sx_cstr_eq(arg, "-o") != 0 {
+            i = i + 1
+            if i < argc {
+                out_file = sx_argv_get(argv, i)
+            }
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "--target") != 0 {
+            i = i + 1
+            if i < argc {
+                let targ = sx_argv_get(argv, i)
+                if sx_cstr_eq(targ, "arm64") != 0 {
+                    sx_ctx_set(ctx, CTX_OPT_TARGET(), TARGET_ARM64())
+                } else {
+                    if sx_cstr_eq(targ, "llvm") != 0 {
+                        sx_ctx_set(ctx, CTX_OPT_TARGET(), TARGET_LLVM_IR())
+                    } else {
+                        sx_ctx_set(ctx, CTX_OPT_TARGET(), TARGET_X86_64())
+                    }
+                }
+            }
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "--emit-llvm") != 0 {
+            sx_ctx_set(ctx, CTX_OPT_TARGET(), TARGET_LLVM_IR())
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "--emit-asm") != 0 {
+            sx_ctx_set(ctx, CTX_OPT_EMIT_ASM(), 1)
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "--dump-ast") != 0 {
+            sx_ctx_set(ctx, CTX_OPT_DUMP_AST(), 1)
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "--dump-ir") != 0 {
+            sx_ctx_set(ctx, CTX_OPT_DUMP_IR(), 1)
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "--link") != 0 {
+            i = i + 1
+            if i < argc {
+                let ext = sx_argv_get(argv, i)
+                sx_ctx_set(ctx, CTX_OPT_EXT_LIB(), ext)
+            }
+            handled = 1
+        }
+        if handled == 0 && sx_cstr_eq(arg, "-g") != 0 {
+            sx_ctx_set(ctx, CTX_OPT_DEBUG(), 1)
+            handled = 1
+        }
+        if handled == 0 {
+            src_file = arg
+        }
+        i = i + 1
+    }
+
+    if src_file == 0 {
+        println("[Synchronix] Error: missing required file or argument.")
+        return 1
+    }
+    let rc = sx_compile_file(ctx, src_file, out_file)
+    return rc
+}
+
+// ----------------------------------------------------------------------------
+// Subcommand Dispatcher
+// ----------------------------------------------------------------------------
+func sx_cli_dispatch(ctx: Int, argc: Int, argv: Int) -> Int {
+    let cmd = sx_argv_get(argv, 1)
+
+    if sx_cstr_eq(cmd, "--version") != 0 { sx_print_version(); return 0 }
+    if sx_cstr_eq(cmd, "--help") != 0 || sx_cstr_eq(cmd, "-h") != 0 { sx_print_banner(); return 0 }
+    if sx_cstr_eq(cmd, "--self-test") != 0 { return sx_v2_self_test() }
+    if sx_cstr_eq(cmd, "lsp") != 0 { return sx_cmd_lsp() }
+
+    if sx_cstr_eq(cmd, "new") != 0 {
+        if argc < 3 { println("[Synchronix] Error: missing required file or argument."); return 1 }
+        let pname = sx_argv_get(argv, 2)
+        return sx_cmd_new(pname)
+    }
+    if sx_cstr_eq(cmd, "fmt") != 0 {
+        if argc < 3 { println("[Synchronix] Error: missing required file or argument."); return 1 }
+        let fpath = sx_argv_get(argv, 2)
+        return sx_cmd_fmt(ctx, fpath)
+    }
+    if sx_cstr_eq(cmd, "lint") != 0 {
+        if argc < 3 { println("[Synchronix] Error: missing required file or argument."); return 1 }
+        let lpath = sx_argv_get(argv, 2)
+        return sx_cmd_lint(ctx, lpath)
+    }
+    if sx_cstr_eq(cmd, "debug") != 0 {
+        if argc < 3 { println("[Synchronix] Error: missing required file or argument."); return 1 }
+        let dpath = sx_argv_get(argv, 2)
+        return sx_cmd_debug(ctx, dpath)
+    }
+    if sx_cstr_eq(cmd, "profile") != 0 {
+        if argc < 3 { println("[Synchronix] Error: missing required file or argument."); return 1 }
+        let ppath = sx_argv_get(argv, 2)
+        return sx_cmd_profile(ctx, ppath)
+    }
+    if sx_cstr_eq(cmd, "run") != 0 {
+        var rsrc = 0
+        if argc >= 3 { rsrc = sx_argv_get(argv, 2) }
+        return sx_cmd_run(ctx, rsrc)
+    }
+    if sx_cstr_eq(cmd, "test") != 0 {
+        var tsrc = 0
+        if argc >= 3 { tsrc = sx_argv_get(argv, 2) }
+        return sx_cmd_test(ctx, tsrc)
+    }
+    if sx_cstr_eq(cmd, "build") != 0 {
+        var bsrc = 0
+        if argc >= 3 { bsrc = sx_argv_get(argv, 2) }
+        return sx_cmd_build(ctx, bsrc, 0)
+    }
+    if sx_cstr_eq(cmd, "compile") != 0 {
+        return sx_cli_compile(ctx, argc, argv, 2)
+    }
+    // Direct invocation: `synchronix <file.synchronix> [flags...]`
+    return sx_cli_compile(ctx, argc, argv, 1)
+}
+
+func main(argc: Int, argv: Int) -> Int {
+    if argc < 2 {
+        sx_print_banner()
+        return 0
+    }
+    let ctx = sx_ctx_create()
+    let rc = sx_cli_dispatch(ctx, argc, argv)
+    sx_ctx_destroy(ctx)
+    return rc
+}

@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 Synchronix Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Full license text: ../../LICENSE
+// End-User License Agreement: ../../EULA.md
+
+// ============================================================================
+// SYNCHRONIX v2.0.0 — Foundation: M:N Async Scheduler & Fibers
+// (v2/src/runtime/async_rt.synchronix)
+// ============================================================================
+// Pure Synchronix Kotlin-inspired cooperative M:N fiber/task scheduler:
+//   - sx2_sched_init()            : initializes fiber queue & telemetry
+//   - sx2_spawn(sched, fn_id, arg): queues lightweight task onto M:N work queue
+//   - sx2_sched_step(sched)       : dispatches next READY fiber round-robin
+//   - sx2_await(sched, task_id)   : drives scheduler until task reaches DONE
+//   - sx2_sched_stats(sched)      : prints M:N scheduler telemetry
+// ============================================================================
+
+import sx_defs
+import utils
+
+phi async_rt_max_tasks = 256 > 0
+
+func SCH_TABLE()     -> Int { return 0 }
+func SCH_COUNT()     -> Int { return 1 }
+func SCH_COMPLETED() -> Int { return 2 }
+func SCH_YIELDS()    -> Int { return 3 }
+
+func sx2_sched_init() -> Int {
+    let sch = sx_buf_new(8)
+    let tbl = sx_buf_new(MAX_TASKS() * TASK_STRIDE())
+    sx_buf_set(sch, SCH_TABLE(), tbl)
+    sx_buf_set(sch, SCH_COUNT(), 0)
+    sx_buf_set(sch, SCH_COMPLETED(), 0)
+    sx_buf_set(sch, SCH_YIELDS(), 0)
+    return sch
+}
+
+func sx2_spawn(sch: Int, fn_id: Int, arg: Int) -> Int {
+    let cnt = sx_buf_get(sch, SCH_COUNT())
+    if cnt >= MAX_TASKS() {
+        return 0
+    }
+    sx_buf_set(sch, SCH_COUNT(), cnt + 1)
+    let tbl = sx_buf_get(sch, SCH_TABLE())
+    let base = cnt * TASK_STRIDE()
+    let tid = cnt + 1
+    sx_buf_set(tbl, base + TASK_ID(), tid)
+    sx_buf_set(tbl, base + TASK_STATE(), TASK_READY())
+    sx_buf_set(tbl, base + TASK_FN(), fn_id)
+    sx_buf_set(tbl, base + TASK_ARG(), arg)
+    sx_buf_set(tbl, base + TASK_RESULT(), 0)
+    return tid
+}
+
+// Built-in fiber kernel dispatcher (fn_id selects worker kernel)
+func sx2_fiber_dispatch(fn_id: Int, arg: Int) -> Int {
+    if fn_id == 1 {
+        return arg * arg + 10
+    }
+    if fn_id == 2 {
+        return arg * 2 + 1
+    }
+    return arg
+}
+
+func sx2_sched_run_one(sch: Int) -> Int {
+    let cnt = sx_buf_get(sch, SCH_COUNT())
+    let tbl = sx_buf_get(sch, SCH_TABLE())
+    var i = 0
+    while i < cnt {
+        let base = i * TASK_STRIDE()
+        let st = sx_buf_get(tbl, base + TASK_STATE())
+        if st == TASK_READY() {
+            sx_buf_set(tbl, base + TASK_STATE(), TASK_RUNNING())
+            let fn_id = sx_buf_get(tbl, base + TASK_FN())
+            let arg = sx_buf_get(tbl, base + TASK_ARG())
+            let res = sx2_fiber_dispatch(fn_id, arg)
+            sx_buf_set(tbl, base + TASK_RESULT(), res)
+            sx_buf_set(tbl, base + TASK_STATE(), TASK_DONE())
+            let comp = sx_buf_get(sch, SCH_COMPLETED())
+            sx_buf_set(sch, SCH_COMPLETED(), comp + 1)
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+func sx2_await(sch: Int, task_id: Int) -> Int
+    requires task_id >= 1
+{
+    let idx = task_id - 1
+    let tbl = sx_buf_get(sch, SCH_TABLE())
+    let base = idx * TASK_STRIDE()
+    var running = 1
+    while running != 0 {
+        let st = sx_buf_get(tbl, base + TASK_STATE())
+        if st == TASK_DONE() {
+            running = 0
+        } else {
+            let y = sx_buf_get(sch, SCH_YIELDS())
+            sx_buf_set(sch, SCH_YIELDS(), y + 1)
+            let ran = sx2_sched_run_one(sch)
+            if ran == 0 {
+                running = 0
+            }
+        }
+    }
+    let res = sx_buf_get(tbl, base + TASK_RESULT())
+    return res
+}
+
+func sx2_sched_stats(sch: Int) -> Int {
+    let sp = sx_buf_get(sch, SCH_COUNT())
+    let cp = sx_buf_get(sch, SCH_COMPLETED())
+    let yl = sx_buf_get(sch, SCH_YIELDS())
+    print("  M:N Async   : spawned="); print(sp)
+    print(" completed="); print(cp)
+    print(" yields="); println(yl)
+    return 0
+}

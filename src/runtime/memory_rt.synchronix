@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 Synchronix Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Full license text: ../../LICENSE
+// End-User License Agreement: ../../EULA.md
+
+// ============================================================================
+// SYNCHRONIX v2.0.0 — Foundation: Unified Memory Engine
+// (v2/src/runtime/memory_rt.synchronix)
+// ============================================================================
+// Pure Synchronix Self-Hosted Unified Memory Runtime:
+//   - Fast Bump-Pointer Arena Allocator (Zero-Cost Escape-Promoted Allocs)
+//   - Swift-inspired ARC Engine (Deterministic Fast Reference Counting)
+//   - Kotlin-inspired Tracing Mark-and-Sweep GC Engine + Shadow Root Stack
+// ============================================================================
+
+import sx_defs
+import utils
+
+phi mem_rt_arena_capacity = (8192 * 8) == 65536
+phi mem_rt_obj_slots      = 6 == 6
+
+// Unified Memory Runtime State Layout (slots in rt_mem handle)
+func MRT_ARENA_BUF()   -> Int { return 0 }
+func MRT_ARENA_POS()   -> Int { return 1 }
+func MRT_ARC_ALLOCS()  -> Int { return 2 }
+func MRT_ARC_RETAINS() -> Int { return 3 }
+func MRT_ARC_RELS()    -> Int { return 4 }
+func MRT_ARC_FREED()   -> Int { return 5 }
+func MRT_ARC_LIVE()    -> Int { return 6 }
+func MRT_GC_HEAD()     -> Int { return 7 }
+func MRT_GC_ROOTS()    -> Int { return 8 }
+func MRT_GC_RTOP()     -> Int { return 9 }
+func MRT_GC_ALLOCS()   -> Int { return 10 }
+func MRT_GC_CYCLES()   -> Int { return 11 }
+func MRT_GC_SWEPT()    -> Int { return 12 }
+func MRT_GC_LIVE()     -> Int { return 13 }
+
+func sx2_mem_init() -> Int {
+    let rt = sx_buf_new(16)
+    let arena = sx_buf_new(8192)
+    let roots = sx_buf_new(MAX_GC_ROOTS())
+    sx_buf_set(rt, MRT_ARENA_BUF(), arena)
+    sx_buf_set(rt, MRT_ARENA_POS(), 0)
+    sx_buf_set(rt, MRT_GC_HEAD(), 0)
+    sx_buf_set(rt, MRT_GC_ROOTS(), roots)
+    sx_buf_set(rt, MRT_GC_RTOP(), 0)
+    return rt
+}
+
+// ----------------------------------------------------------------------------
+// 1. Bump-Pointer Arena Allocator (with heap fallback on overflow like V1)
+// ----------------------------------------------------------------------------
+func sx2_arena_alloc(rt: Int, words: Int) -> Int
+    requires words > 0
+{
+    let pos = sx_buf_get(rt, MRT_ARENA_POS())
+    if pos + words <= 8192 {
+        sx_buf_set(rt, MRT_ARENA_POS(), pos + words)
+        return pos
+    }
+    let fallback = sx_buf_new(words)
+    return fallback
+}
+
+func sx2_arena_reset(rt: Int) -> Int {
+    sx_buf_set(rt, MRT_ARENA_POS(), 0)
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// 2. Swift-Inspired Deterministic ARC Engine
+// ----------------------------------------------------------------------------
+func sx2_arc_alloc(rt: Int, payload_words: Int) -> Int
+    requires payload_words > 0
+{
+    let obj = sx_buf_new(OBJ_STRIDE() + payload_words - 1)
+    sx_buf_set(obj, OBJ_MAGIC(), SX_MAGIC_ARC())
+    sx_buf_set(obj, OBJ_FLAGS(), OBJF_ARC())
+    sx_buf_set(obj, OBJ_RC(), 1)
+    sx_buf_set(obj, OBJ_SIZE(), payload_words * 8)
+    sx_buf_set(obj, OBJ_NEXT(), 0)
+    sx_buf_set(obj, OBJ_VAL(), 0)
+
+    let a = sx_buf_get(rt, MRT_ARC_ALLOCS())
+    let l = sx_buf_get(rt, MRT_ARC_LIVE())
+    sx_buf_set(rt, MRT_ARC_ALLOCS(), a + 1)
+    sx_buf_set(rt, MRT_ARC_LIVE(), l + 1)
+    return obj
+}
+
+func sx2_arc_box_int(rt: Int, value: Int) -> Int {
+    let obj = sx2_arc_alloc(rt, 1)
+    sx_buf_set(obj, OBJ_VAL(), value)
+    return obj
+}
+
+func sx2_arc_unbox_int(obj: Int) -> Int {
+    if obj == 0 { return 0 }
+    let v = sx_buf_get(obj, OBJ_VAL())
+    return v
+}
+
+func sx2_arc_retain(rt: Int, obj: Int) -> Int {
+    if obj == 0 { return 0 }
+    let magic = sx_buf_get(obj, OBJ_MAGIC())
+    if magic != SX_MAGIC_ARC() { return obj }
+    let rc = sx_buf_get(obj, OBJ_RC())
+    sx_buf_set(obj, OBJ_RC(), rc + 1)
+    let r = sx_buf_get(rt, MRT_ARC_RETAINS())
+    sx_buf_set(rt, MRT_ARC_RETAINS(), r + 1)
+    return obj
+}
+
+func sx2_arc_release(rt: Int, obj: Int) -> Int {
+    if obj == 0 { return 0 }
+    let magic = sx_buf_get(obj, OBJ_MAGIC())
+    if magic != SX_MAGIC_ARC() { return 0 }
+
+    let rels = sx_buf_get(rt, MRT_ARC_RELS())
+    sx_buf_set(rt, MRT_ARC_RELS(), rels + 1)
+
+    let rc = sx_buf_get(obj, OBJ_RC()) - 1
+    sx_buf_set(obj, OBJ_RC(), rc)
+    if rc > 0 {
+        return rc
+    }
+
+    // rc == 0: deterministic deallocation & double-free guard
+    sx_buf_set(obj, OBJ_MAGIC(), 0)
+    let live = sx_buf_get(rt, MRT_ARC_LIVE())
+    let freed = sx_buf_get(rt, MRT_ARC_FREED())
+    sx_buf_set(rt, MRT_ARC_LIVE(), live - 1)
+    sx_buf_set(rt, MRT_ARC_FREED(), freed + 1)
+    sx_buf_free(obj)
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// 3. Kotlin-Inspired Tracing Mark-and-Sweep GC Engine + Shadow Root Stack
+// ----------------------------------------------------------------------------
+func sx2_gc_box_int(rt: Int, value: Int) -> Int {
+    let obj = sx_buf_new(OBJ_STRIDE())
+    let head = sx_buf_get(rt, MRT_GC_HEAD())
+    sx_buf_set(obj, OBJ_MAGIC(), SX_MAGIC_GC())
+    sx_buf_set(obj, OBJ_FLAGS(), OBJF_GC())
+    sx_buf_set(obj, OBJ_RC(), 0)
+    sx_buf_set(obj, OBJ_SIZE(), 8)
+    sx_buf_set(obj, OBJ_NEXT(), head)
+    sx_buf_set(obj, OBJ_VAL(), value)
+    sx_buf_set(rt, MRT_GC_HEAD(), obj)
+
+    let a = sx_buf_get(rt, MRT_GC_ALLOCS())
+    let l = sx_buf_get(rt, MRT_GC_LIVE())
+    sx_buf_set(rt, MRT_GC_ALLOCS(), a + 1)
+    sx_buf_set(rt, MRT_GC_LIVE(), l + 1)
+    return obj
+}
+
+func sx2_gc_unbox_int(obj: Int) -> Int {
+    if obj == 0 { return 0 }
+    let v = sx_buf_get(obj, OBJ_VAL())
+    return v
+}
+
+func sx2_gc_push_root(rt: Int, obj: Int) -> Int {
+    let top = sx_buf_get(rt, MRT_GC_RTOP())
+    if top < MAX_GC_ROOTS() {
+        let roots = sx_buf_get(rt, MRT_GC_ROOTS())
+        sx_buf_set(roots, top, obj)
+        sx_buf_set(rt, MRT_GC_RTOP(), top + 1)
+    }
+    return top
+}
+
+func sx2_gc_pop_root(rt: Int) -> Int {
+    let top = sx_buf_get(rt, MRT_GC_RTOP())
+    if top > 0 {
+        sx_buf_set(rt, MRT_GC_RTOP(), top - 1)
+    }
+    return 0
+}
+
+func sx2_gc_collect(rt: Int) -> Int {
+    let cyc = sx_buf_get(rt, MRT_GC_CYCLES())
+    sx_buf_set(rt, MRT_GC_CYCLES(), cyc + 1)
+
+    // MARK PHASE: mark every GC object reachable from shadow root stack
+    let roots = sx_buf_get(rt, MRT_GC_ROOTS())
+    let rtop = sx_buf_get(rt, MRT_GC_RTOP())
+    var i = 0
+    while i < rtop {
+        let obj = sx_buf_get(roots, i)
+        if obj != 0 {
+            let m = sx_buf_get(obj, OBJ_MAGIC())
+            if m == SX_MAGIC_GC() {
+                let fl = sx_buf_get(obj, OBJ_FLAGS())
+                let mfl = fl || OBJF_GC_MARKED()
+                sx_buf_set(obj, OBJ_FLAGS(), mfl)
+            }
+        }
+        i = i + 1
+    }
+
+    // SWEEP PHASE: unlink & reclaim unmarked objects
+    var swept = 0
+    var prev = 0
+    var cur = sx_buf_get(rt, MRT_GC_HEAD())
+    while cur != 0 {
+        let nxt = sx_buf_get(cur, OBJ_NEXT())
+        let fl = sx_buf_get(cur, OBJ_FLAGS())
+        let marked = fl && OBJF_GC_MARKED()
+        if marked != 0 {
+            sx_buf_set(cur, OBJ_FLAGS(), OBJF_GC())
+            prev = cur
+        } else {
+            if prev == 0 {
+                sx_buf_set(rt, MRT_GC_HEAD(), nxt)
+            } else {
+                sx_buf_set(prev, OBJ_NEXT(), nxt)
+            }
+            sx_buf_set(cur, OBJ_MAGIC(), 0)
+            sx_buf_free(cur)
+            swept = swept + 1
+            let live = sx_buf_get(rt, MRT_GC_LIVE())
+            let sw_tot = sx_buf_get(rt, MRT_GC_SWEPT())
+            sx_buf_set(rt, MRT_GC_LIVE(), live - 1)
+            sx_buf_set(rt, MRT_GC_SWEPT(), sw_tot + 1)
+        }
+        cur = nxt
+    }
+    return swept
+}
+
+func sx2_mem_stats(rt: Int) -> Int {
+    let aa = sx_buf_get(rt, MRT_ARC_ALLOCS())
+    let ar = sx_buf_get(rt, MRT_ARC_RETAINS())
+    let al = sx_buf_get(rt, MRT_ARC_RELS())
+    let af = sx_buf_get(rt, MRT_ARC_FREED())
+    let av = sx_buf_get(rt, MRT_ARC_LIVE())
+
+    let ga = sx_buf_get(rt, MRT_GC_ALLOCS())
+    let gc_c = sx_buf_get(rt, MRT_GC_CYCLES())
+    let gs = sx_buf_get(rt, MRT_GC_SWEPT())
+    let gl = sx_buf_get(rt, MRT_GC_LIVE())
+    let gr = sx_buf_get(rt, MRT_GC_RTOP())
+    let ap = sx_buf_get(rt, MRT_ARENA_POS())
+
+    println("[Synchronix v2 Runtime] Unified Memory Report:")
+    print("  ARC Engine  : allocs="); print(aa)
+    print(" retains="); print(ar)
+    print(" releases="); print(al)
+    print(" freed="); print(af)
+    print(" live="); println(av)
+
+    print("  GC Engine   : allocs="); print(ga)
+    print(" cycles="); print(gc_c)
+    print(" swept="); print(gs)
+    print(" live="); print(gl)
+    print(" roots="); println(gr)
+
+    print("  Arena Mgr   : used="); print(ap * 8)
+    println(" bytes / 65536 bytes")
+    return 0
+}

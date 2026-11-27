@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 Synchronix Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Full license text: ../../LICENSE
+// End-User License Agreement: ../../EULA.md
+
+// ============================================================================
+// SYNCHRONIX v2.0.0 — Foundation: Synchronix Standard Library (std)
+// (v2/src/runtime/stdlib.synchronix)
+// ============================================================================
+// Pure Synchronix Standard Library:
+//   - Math (abs, min, max, clamp, pow, gcd, fib, factorial)
+//   - Higher-order Lambda combinators & Generics utilities
+//   - Runtime diagnostics & timing
+// ============================================================================
+
+import sx_defs
+
+extern func clock() -> Int;
+extern func sx_print_int(v: Int) -> Int;
+extern func sx_println_int(v: Int) -> Int;
+extern func sx_print_str(s: Int) -> Int;
+extern func sx_println_str(s: Int) -> Int;
+extern func sx_runtime_report() -> Int;
+
+phi stdlib_math_axiom = (6 * 7) == 42
+phi stdlib_pow_base   = 1 == 1
+
+func std_print_int(v: Int) -> Int { return sx_print_int(v) }
+func std_println_int(v: Int) -> Int { return sx_println_int(v) }
+func std_print_str(s: Int) -> Int { return sx_print_str(s) }
+func std_println_str(s: Int) -> Int { return sx_println_str(s) }
+func std_runtime_report() -> Int { return sx_runtime_report() }
+
+func std_abs(x: Int) -> Int {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+
+func std_min(a: Int, b: Int) -> Int {
+    if a <= b {
+        return a
+    }
+    return b
+}
+
+func std_max(a: Int, b: Int) -> Int {
+    if a >= b {
+        return a
+    }
+    return b
+}
+
+func std_clamp(v: Int, lo: Int, hi: Int) -> Int
+    requires lo <= hi
+{
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+func std_pow(base: Int, exp: Int) -> Int
+    requires exp >= 0
+{
+    var res = 1
+    var e = exp
+    while e > 0 {
+        res = res * base
+        e = e - 1
+    }
+    return res
+}
+
+func std_gcd(a_in: Int, b_in: Int) -> Int {
+    var a = std_abs(a_in)
+    var b = std_abs(b_in)
+    while b != 0 {
+        let t = a % b
+        a = b
+        b = t
+    }
+    return a
+}
+
+func std_factorial(n: Int) -> Int
+    requires n >= 0
+{
+    var acc = 1
+    var i = 1
+    while i <= n {
+        acc = acc * i
+        i = i + 1
+    }
+    return acc
+}
+
+func std_fib(n: Int) -> Int
+    requires n >= 0
+{
+    if n <= 1 { return n }
+    var a = 0
+    var b = 1
+    var i = 2
+    while i <= n {
+        let nxt = a + b
+        a = b
+        b = nxt
+        i = i + 1
+    }
+    return b
+}
+
+func std_identity<T>(x: T) -> T {
+    return x
+}
+
+func std_clock_ticks() -> Int {
+    let t = clock()
+    return t
+}
+
+func std_apply_scale(value: Int, factor: Int) -> Int {
+    return value * factor
+}

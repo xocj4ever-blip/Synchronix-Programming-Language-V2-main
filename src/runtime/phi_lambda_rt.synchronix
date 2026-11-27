@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 Synchronix Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Full license text: ../../LICENSE
+// End-User License Agreement: ../../EULA.md
+
+// ============================================================================
+// SYNCHRONIX v2.0.0 — Foundation: Phi & Lambda Runtime
+// (v2/src/runtime/phi_lambda_rt.synchronix)
+// ============================================================================
+// Pure Synchronix implementation of:
+//   - Phi Formal Logic Runtime (dynamic contract checks & violation reporting)
+//   - Lambda Closure Runtime (ARC-managed closure env allocation & invocation)
+// ============================================================================
+
+import sx_defs
+import utils
+
+extern func exit(code: Int) -> Int;
+
+phi phi_rt_env_header = 2 == 2
+
+func PRT_CHECKS()   -> Int { return 0 }
+func PRT_PASSED()   -> Int { return 1 }
+func PRT_CLOSURES() -> Int { return 2 }
+
+func sx2_phi_rt_init() -> Int {
+    let prt = sx_buf_new(4)
+    return prt
+}
+
+func sx2_phi_check(prt: Int, cond: Int, line: Int) -> Int {
+    let chk = sx_buf_get(prt, PRT_CHECKS())
+    sx_buf_set(prt, PRT_CHECKS(), chk + 1)
+    if cond == 0 {
+        print("[Synchronix v2 Phi Runtime] FORMAL PROOF VIOLATION at line ")
+        print(line)
+        println("! Aborting.")
+        exit(1)
+    }
+    let ok = sx_buf_get(prt, PRT_PASSED())
+    sx_buf_set(prt, PRT_PASSED(), ok + 1)
+    return 1
+}
+
+func sx2_phi_stats(prt: Int) -> Int {
+    let chk = sx_buf_get(prt, PRT_CHECKS())
+    let ok = sx_buf_get(prt, PRT_PASSED())
+    let cl = sx_buf_get(prt, PRT_CLOSURES())
+    print("  Phi Runtime : dynamic_checks="); print(chk)
+    print(" passed="); print(ok)
+    print(" closures_created="); println(cl)
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// Lambda Closure Environment Objects: [0]=fn_id, [1]=env_cnt, [2+i]=env[i]
+// ----------------------------------------------------------------------------
+func sx2_closure_alloc(prt: Int, fn_id: Int, env_cnt: Int) -> Int
+    requires env_cnt >= 0
+{
+    let cl = sx_buf_new(2 + env_cnt)
+    sx_buf_set(cl, 0, fn_id)
+    sx_buf_set(cl, 1, env_cnt)
+    let cnt = sx_buf_get(prt, PRT_CLOSURES())
+    sx_buf_set(prt, PRT_CLOSURES(), cnt + 1)
+    return cl
+}
+
+func sx2_closure_set_env(cl: Int, idx: Int, value: Int) -> Int
+    requires idx >= 0
+{
+    sx_buf_set(cl, 2 + idx, value)
+    return value
+}
+
+func sx2_closure_get_env(cl: Int, idx: Int) -> Int
+    requires idx >= 0
+{
+    let v = sx_buf_get(cl, 2 + idx)
+    return v
+}
+
+func sx2_closure_call1(cl: Int, arg0: Int) -> Int {
+    let fn_id = sx_buf_get(cl, 0)
+    let cap0 = sx_buf_get(cl, 2)
+    if fn_id == 1 {
+        return arg0 * cap0
+    }
+    if fn_id == 2 {
+        return arg0 + cap0
+    }
+    return arg0
+}
